@@ -469,7 +469,6 @@ dependencies = [
 [[package]]
 name = "boring"
 version = "5.0.2"
-source = "git+https://github.com/signalapp/boring?tag=signal-v5.0.2#2c157897feea0c54f5eca93407a157fa90703b5f"
 dependencies = [
  "bitflags 2.13.0",
  "boring-sys",
@@ -481,7 +480,6 @@ dependencies = [
 [[package]]
 name = "boring-sys"
 version = "5.0.2"
-source = "git+https://github.com/signalapp/boring?tag=signal-v5.0.2#2c157897feea0c54f5eca93407a157fa90703b5f"
 dependencies = [
  "bindgen",
  "cmake",
@@ -5445,7 +5443,6 @@ dependencies = [
 [[package]]
 name = "tokio-boring"
 version = "5.0.2"
-source = "git+https://github.com/signalapp/boring?tag=signal-v5.0.2#2c157897feea0c54f5eca93407a157fa90703b5f"
 dependencies = [
  "boring",
  "boring-sys",

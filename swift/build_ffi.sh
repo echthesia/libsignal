@@ -86,7 +86,7 @@ if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
   export RUSTFLAGS
 fi
 
-if [[ "${CARGO_BUILD_TARGET:-}" =~ -ios(-sim|-macabi)?$ ]]; then
+if [[ "${CARGO_BUILD_TARGET:-}" =~ -ios(-sim|-macabi)?$|-watchos(-sim)?$ ]]; then
   export IPHONEOS_DEPLOYMENT_TARGET=15
 
   # Use full LTO to reduce binary size
