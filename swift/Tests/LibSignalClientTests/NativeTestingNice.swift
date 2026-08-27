@@ -14,7 +14,7 @@
 
 // swiftlint:disable explicit_init_for_public_struct
 
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 import Foundation
 import SignalFfi

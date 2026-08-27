@@ -55,7 +55,7 @@ public class ThrowsAfterInputStream: SignalInputStream {
     private var readBeforeThrow: UInt64
 }
 
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 func readResource(forName name: String) -> Data {
     try! Data(

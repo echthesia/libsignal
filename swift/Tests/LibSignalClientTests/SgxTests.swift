@@ -6,7 +6,7 @@
 import LibSignalClient
 import XCTest
 
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 class SgxTests: TestCaseBase {
     enum ServiceType {

@@ -560,7 +560,7 @@ public struct Auth: Sendable {
 }
 
 // This test endpoint isn't generated in device builds, to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 extension Auth {
     // To be used by the tests

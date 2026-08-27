@@ -4,7 +4,7 @@
 //
 
 // These testing endpoints aren't generated in device builds, to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 import Foundation
 @testable import LibSignalClient

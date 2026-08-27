@@ -10,7 +10,7 @@ import Testing
 @testable import LibSignalClient
 
 // These tests depend on test-only functions that aren't available on device builds to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 class RegistrationServiceConversionTests {
     private struct ErrorTest {

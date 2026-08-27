@@ -18,7 +18,7 @@ final class SecureValueRecoveryBackupTests: TestCaseBase {
         let process = ProcessInfo.processInfo
 
         // The OTP-secret-based Auth isn't available in device builds.
-        #if !os(iOS) || targetEnvironment(simulator)
+        #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
         if let enclaveSecret = process.environment["LIBSIGNAL_TESTING_SVRB_ENCLAVE_SECRET"] {
             let username = testBackupKey.deriveBackupId(aci: testAci).toHex()
             return try! Auth(

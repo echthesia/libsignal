@@ -111,7 +111,10 @@ export CFLAGS_aarch64_apple_ios_macabi="--target=arm64-apple-ios-macabi ${CFLAGS
 export CFLAGS_x86_64_apple_ios_macabi="--target=x86_64-apple-ios-macabi ${CFLAGS:-}"
 
 FEATURES=()
-if [[ "${CARGO_BUILD_TARGET:-}" != "aarch64-apple-ios" ]]; then
+# The testing bridge is left out of device builds to save on code size.
+# (signal-watchos: the watchOS device slice too; the Swift `#if` guards on the
+# testing entry points match this.)
+if [[ "${CARGO_BUILD_TARGET:-}" != "aarch64-apple-ios" && "${CARGO_BUILD_TARGET:-}" != "aarch64-apple-watchos" ]]; then
   FEATURES+=("libsignal-bridge-testing")
 fi
 

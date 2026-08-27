@@ -8,7 +8,7 @@ import XCTest
 @testable import LibSignalClient
 
 // These testing endpoints aren't generated in device builds, to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 class UnauthKeysServiceTests: UnauthChatServiceTestBase<any UnauthKeysService> {
     override class var selector: SelectorCheck { .keys }

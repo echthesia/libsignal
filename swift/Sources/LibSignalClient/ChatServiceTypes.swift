@@ -72,7 +72,7 @@ public struct ChatRequest: Equatable, Sendable {
         }
 
         // These testing endpoints aren't generated in device builds, to save on code size.
-        #if !os(iOS) || targetEnvironment(simulator)
+        #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
         internal var method: String {
             failOnError {
                 try withNativeHandle { request in

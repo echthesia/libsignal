@@ -152,7 +152,7 @@ final class KeyTransparencyTests: TestCaseBase {
     }
 
     // These testing endpoints aren't generated in device builds, to save on code size.
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testNonFatalErrorBridging() throws {
         do {
             try checkError(signal_testing_key_trans_non_fatal_verification_failure())

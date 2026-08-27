@@ -13,7 +13,7 @@ extension ConnectionManager {
     func assertIsUsingProxyIs(_ value: Int32) {
         // The testing native function used to implement this isn't available on device
         // builds to save on code size. If it's present use it, otherwise this is a no-op.
-        #if !os(iOS) || targetEnvironment(simulator)
+        #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
         let isUsingProxy =
             withNativeHandle { handle in
                 failOnError {
@@ -31,7 +31,7 @@ final class ChatServiceTests: TestCaseBase {
     private static let userAgent = "test"
 
     // These testing endpoints aren't generated in device builds, to save on code size.
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
     private static let expectedStatus: UInt16 = 200
     private static let expectedMessage = "OK"
@@ -207,7 +207,7 @@ final class ChatConnectionTests: TestCaseBase {
     private static let userAgent = "test"
 
     // These testing endpoints aren't generated in device builds, to save on code size.
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testListenerCallbacks() async throws {
         class Listener: ChatConnectionListener {
             let queueEmpty: XCTestExpectation

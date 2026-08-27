@@ -8,7 +8,7 @@ import XCTest
 @testable import LibSignalClient
 
 class MessageBackupTests: TestCaseBase {
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testValidInput() throws {
         let validBackupContents = readResource(forName: "new_account.binproto.encrypted")
 
@@ -58,7 +58,7 @@ class MessageBackupTests: TestCaseBase {
         XCTAssertNotEqual(testKey.hmacKey, testKey.aesKey)
     }
 
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testInvalidInput() throws {
         // Start with a valid file, then overwrite some bytes
         var bytes = readResource(forName: "new_account.binproto.encrypted")
@@ -98,7 +98,7 @@ class MessageBackupTests: TestCaseBase {
         }
     }
 
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testInputThrowsAfter() {
         let bytes = readResource(forName: "new_account.binproto.encrypted")
         let makeStream = {
@@ -151,7 +151,7 @@ class MessageBackupTests: TestCaseBase {
         )
     }
 
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testComparableBackup() throws {
         let bytes = readResource(forName: "canonical-backup.binproto")
         let backup = try ComparableBackup(

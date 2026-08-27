@@ -7,7 +7,7 @@ import Foundation
 import SignalFfi
 
 // These APIs aren't available in device builds, to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 /// An in-memory representation of a backup file used to compare contents.
 ///

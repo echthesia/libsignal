@@ -11,7 +11,7 @@ import XCTest
 
 final class NativeTests: XCTestCase {
     // These testing endpoints aren't generated in device builds, to save on code size.
-    #if !os(iOS) || targetEnvironment(simulator)
+    #if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
     func testTestingFnsAreAvailable() async throws {
         let output = try invokeFnReturningInteger(fn: SignalFfi.signal_test_only_fn_returns_123)
         XCTAssertEqual(output, 123)

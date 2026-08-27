@@ -9,7 +9,7 @@ import XCTest
 @testable import LibSignalClient
 
 // These testing endpoints aren"t generated in device builds, to save on code size.
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 
 // These constants are from api/backups.rs
 private let TEST_CREDENTIAL = Data(
