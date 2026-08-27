@@ -86,9 +86,16 @@ if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
   export RUSTFLAGS
 fi
 
-if [[ "${CARGO_BUILD_TARGET:-}" =~ -ios(-sim|-macabi)?$|-watchos(-sim)?$ ]]; then
+if [[ "${CARGO_BUILD_TARGET:-}" =~ -ios(-sim|-macabi)?$ ]]; then
   export IPHONEOS_DEPLOYMENT_TARGET=15
+fi
 
+# signal-watchos: watchOS targets take the same size-reduction settings as iOS.
+# The deployment target comes from the caller (scripts/build-libsignal.sh sets
+# WATCHOS_DEPLOYMENT_TARGET). Full LTO is also what lets aarch64-apple-watchos
+# link at all: ring compiles a reference to p256_point_mul_base_vartime with no
+# definition on that target, and only fat LTO strips the unreachable reference.
+if [[ "${CARGO_BUILD_TARGET:-}" =~ -ios(-sim|-macabi)?$|-watchos(-sim)?$ ]]; then
   # Use full LTO to reduce binary size
   export CARGO_PROFILE_RELEASE_LTO=fat
   export CFLAGS="-flto=full ${CFLAGS:-}"
