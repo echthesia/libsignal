@@ -68,10 +68,12 @@ public class Net {
         remoteConfig: [String: String] = [:]
     ) {
         self.environment = env
-        self.pending = Pending(
-            userAgent: userAgent,
-            buildVariant: buildVariant,
-            remoteConfig: remoteConfig
+        self.state = .pending(
+            Pending(
+                userAgent: userAgent,
+                buildVariant: buildVariant,
+                remoteConfig: remoteConfig
+            )
         )
     }
 
@@ -140,11 +142,7 @@ public class Net {
     ///
     /// Existing connections will not be affected.
     public func setInvalidProxy() {
-        let existing: ConnectionManager? = self.lazyLock.withLock {
-            self.pending.proxy = .invalid
-            return self._connectionManager
-        }
-        existing?.setInvalidProxy()
+        self.configure(pending: { $0.proxy = .invalid }, realized: { $0.setInvalidProxy() })
     }
 
     /// Clears the proxy host (if any) so that future connections will be made directly.
@@ -155,11 +153,7 @@ public class Net {
     /// Existing connections and services will continue with the setting they were created with.
     /// (In particular, changing this setting will not affect any existing ``ChatConnection``s.)
     public func clearProxy() {
-        let existing: ConnectionManager? = self.lazyLock.withLock {
-            self.pending.proxy = .cleared
-            return self._connectionManager
-        }
-        existing?.clearProxy()
+        self.configure(pending: { $0.proxy = .cleared }, realized: { $0.clearProxy() })
     }
 
     /// Enables or disables censorship circumvention for all new connections (until changed).
@@ -170,11 +164,10 @@ public class Net {
     ///
     /// CC is off by default.
     public func setCensorshipCircumventionEnabled(_ enabled: Bool) {
-        let existing: ConnectionManager? = self.lazyLock.withLock {
-            self.pending.censorshipCircumventionEnabled = enabled
-            return self._connectionManager
-        }
-        existing?.setCensorshipCircumventionEnabled(enabled)
+        self.configure(
+            pending: { $0.censorshipCircumventionEnabled = enabled },
+            realized: { $0.setCensorshipCircumventionEnabled(enabled) }
+        )
     }
 
     /// Updates the remote configuration settings used by libsignal with the specified build variant.
@@ -192,12 +185,13 @@ public class Net {
     ///   - remoteConfig: A dictionary containing preprocessed libsignal configuration keys and their associated values
     ///   - buildVariant: The build variant (Production or Beta) that determines which remote config keys to use
     public func setRemoteConfig(_ remoteConfig: [String: String], buildVariant: BuildVariant) {
-        let existing: ConnectionManager? = self.lazyLock.withLock {
-            self.pending.remoteConfig = remoteConfig
-            self.pending.buildVariant = buildVariant
-            return self._connectionManager
-        }
-        existing?.setRemoteConfig(remoteConfig, buildVariant: buildVariant)
+        self.configure(
+            pending: {
+                $0.remoteConfig = remoteConfig
+                $0.buildVariant = buildVariant
+            },
+            realized: { $0.setRemoteConfig(remoteConfig, buildVariant: buildVariant) }
+        )
     }
 
     /// Updates the remote configuration settings used by libsignal using Production build variant.
@@ -224,7 +218,7 @@ public class Net {
         // Nothing to reset if nothing has ever connected. Forcing the runtime
         // into existence to tell it the network changed would be exactly
         // backwards.
-        guard let connectionManager = self.lazyLock.withLock({ self._connectionManager }) else {
+        guard case .realized(_, let connectionManager) = self.lazyLock.withLock({ self.state }) else {
             return
         }
         try connectionManager.withNativeHandle { connectionManager in
@@ -463,6 +457,13 @@ public class Net {
     // change of *when* rather than of behaviour. `setProxy` is deliberately
     // not deferred: it validates its arguments and throws, and a caller
     // configuring a proxy is stating an intent to connect.
+    //
+    // Recording, construction, and replay all happen under `lazyLock`, so no
+    // thread can observe a realized `ConnectionManager` that has not yet had
+    // its recorded settings applied, and no setting applied concurrently with
+    // the first use can be overwritten by a stale replay. The
+    // `ConnectionManager` setters are plain FFI calls that never re-enter
+    // `Net`, so holding a non-reentrant lock across them is safe.
 
     private struct Pending {
         var userAgent: String
@@ -478,47 +479,67 @@ public class Net {
         case invalid
     }
 
+    private enum State {
+        case pending(Pending)
+        case realized(TokioAsyncContext, ConnectionManager)
+    }
+
     private let lazyLock = NSLock()
-    private var pending: Pending
-    private var _asyncContext: TokioAsyncContext?
-    private var _connectionManager: ConnectionManager?
+    private var state: State
+
+    /// Applies a setting to the live `ConnectionManager` if there is one, and
+    /// otherwise records it to be replayed when the manager is built.
+    private func configure(
+        pending applyPending: (inout Pending) -> Void,
+        realized applyRealized: (ConnectionManager) -> Void
+    ) {
+        self.lazyLock.withLock {
+            switch self.state {
+            case .pending(var pending):
+                applyPending(&pending)
+                self.state = .pending(pending)
+            case .realized(_, let connectionManager):
+                applyRealized(connectionManager)
+            }
+        }
+    }
 
     private func realize() -> (TokioAsyncContext, ConnectionManager) {
-        self.lazyLock.lock()
-        if let asyncContext = self._asyncContext, let connectionManager = self._connectionManager {
-            self.lazyLock.unlock()
-            return (asyncContext, connectionManager)
+        self.lazyLock.withLock {
+            switch self.state {
+            case .realized(let asyncContext, let connectionManager):
+                return (asyncContext, connectionManager)
+            case .pending(let pending):
+                let asyncContext = TokioAsyncContext()
+                let connectionManager = ConnectionManager(
+                    env: self.environment,
+                    userAgent: pending.userAgent,
+                    remoteConfig: pending.remoteConfig,
+                    buildVariant: pending.buildVariant
+                )
+                if let enabled = pending.censorshipCircumventionEnabled {
+                    connectionManager.setCensorshipCircumventionEnabled(enabled)
+                }
+                switch pending.proxy {
+                case .untouched:
+                    break
+                case .cleared:
+                    connectionManager.clearProxy()
+                case .invalid:
+                    connectionManager.setInvalidProxy()
+                }
+                self.state = .realized(asyncContext, connectionManager)
+                return (asyncContext, connectionManager)
+            }
         }
-        let pending = self.pending
-        let asyncContext = TokioAsyncContext()
-        let connectionManager = ConnectionManager(
-            env: self.environment,
-            userAgent: pending.userAgent,
-            remoteConfig: pending.remoteConfig,
-            buildVariant: pending.buildVariant
-        )
-        self._asyncContext = asyncContext
-        self._connectionManager = connectionManager
-        self.lazyLock.unlock()
-
-        if let enabled = pending.censorshipCircumventionEnabled {
-            connectionManager.setCensorshipCircumventionEnabled(enabled)
-        }
-        switch pending.proxy {
-        case .untouched:
-            break
-        case .cleared:
-            connectionManager.clearProxy()
-        case .invalid:
-            connectionManager.setInvalidProxy()
-        }
-        return (asyncContext, connectionManager)
     }
 
     /// True once anything has actually used this `Net`. Exposed for tests and
     /// for platforms that assert they never open a socket.
     public var hasBeenUsed: Bool {
-        self.lazyLock.withLock { self._connectionManager != nil }
+        self.lazyLock.withLock {
+            if case .realized = self.state { true } else { false }
+        }
     }
 
     internal var asyncContext: TokioAsyncContext { self.realize().0 }
