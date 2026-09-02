@@ -8,6 +8,8 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use atomic_take::AtomicTake;
@@ -20,23 +22,28 @@ use http::uri::{InvalidUri, PathAndQuery};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use libsignal_account_keys::{MEDIA_ENCRYPTION_KEY_LEN, MEDIA_ID_LEN};
 use libsignal_bridge_macros::{BridgedAsValue, bridge_callbacks};
+use libsignal_core::LogSafeDisplay;
 use libsignal_net::chat::fake::FakeChatRemote;
 use libsignal_net::chat::server_requests::DisconnectCause;
 use libsignal_net::chat::ws::ListenerEvent;
 use libsignal_net::chat::{
     self, ChatConnection, ConnectError, ConnectionInfo, DebugInfo as ChatServiceDebugInfo,
-    LanguageList, Request, Response as ChatResponse, SendError, UnauthenticatedChatHeaders,
+    GrpcBody, LanguageList, Request, Response as ChatResponse, SendError,
+    UnauthenticatedChatHeaders,
 };
 use libsignal_net::connect_state::ConnectionResources;
 use libsignal_net::env::constants::{CHAT_PROVISIONING_PATH, CHAT_WEBSOCKET_PATH};
+use libsignal_net::infra::http_client::Http2Client;
 use libsignal_net::infra::route::{
     DirectOrProxyMode, DirectOrProxyModeDiscriminants, DirectOrProxyProvider, RouteProvider,
     RouteProviderExt, TcpRoute, TlsRoute, UnresolvedHttpsServiceRoute,
 };
 use libsignal_net::infra::tcp_ssl::InvalidProxyConfig;
+use libsignal_net::infra::ws::WebSocketError;
 use libsignal_net::infra::{EnableDomainFronting, EnforceMinimumTls, OverrideNagleAlgorithm};
 use libsignal_net_chat::api::backups::BackupAuthCredentialRejected;
 use libsignal_net_chat::api::{Auth as AuthConn, RequestError, Unauth};
+use libsignal_net_chat::grpc::GrpcServiceProvider;
 use libsignal_net_chat::grpc::backups::{
     CopyBackupMediaFailure, CopyBackupMediaItem, CopyBackupMediaOutcome, DeleteBackupMediaItem,
     MediaBackupInfo, MessageBackupInfo,
@@ -44,12 +51,15 @@ use libsignal_net_chat::grpc::backups::{
 use libsignal_net_chat::stream_util::{
     BulkPolledStream, BulkPolledStreamChunk, BulkPolledStreamTerminationReason,
 };
+use libsignal_net_chat::ws::WsConnection;
 use libsignal_protocol::{IdentityKey, PreKeyBundle, Timestamp};
 use static_assertions::assert_impl_all;
 
 use crate::net::ConnectionManager;
 use crate::net::remote_config::RemoteConfigKey;
-use crate::support::{AsyncMutex, BridgeVec, BridgedError, LimitedLifetimeRef};
+use crate::support::{
+    AsyncMutex, BridgeVec, BridgedError, LimitedLifetimeRef, ResultLike, WithContext,
+};
 use crate::*;
 
 pub type ChatConnectionInfo = ConnectionInfo;
@@ -104,7 +114,7 @@ impl RefUnwindSafe for ProvisioningChatConnection {}
 // there won't be a ton of them allocated.
 #[expect(clippy::large_enum_variant)]
 enum MaybeChatConnection {
-    Running(ChatConnection),
+    Running(ChatWire),
     WaitingForListener {
         runtime: tokio::runtime::Handle,
         pending: AsyncMutex<chat::PendingChatConnection>,
@@ -115,7 +125,263 @@ enum MaybeChatConnection {
 
 assert_impl_all!(MaybeChatConnection: Send, Sync);
 
+/// What a running connection sends on.
+///
+/// Every typed service in `libsignal-net-chat` is written against [`WsConnection`], whose whole
+/// contract is "send this HTTP-shaped request and hand back the HTTP-shaped response". The
+/// websocket is one way to keep that contract. A process that cannot hold a websocket -- a
+/// watch, whose only egress is a reverse proxy -- keeps it with a [`ChatRequester`] instead,
+/// and every service above the wire (messages, profiles, usernames, keys, key transparency)
+/// runs over it unchanged: the same request builders, the same response decoders, the same
+/// error mapping. The gRPC-backed calls are the exception. They need the websocket's HTTP/2
+/// companion, which a requester cannot stand in for, so [`Self::shared_h2_connection`] is
+/// `None` and `require_grpc` refuses them.
+// `MaybeChatConnection`'s own reasoning applies: it lives on the heap anyway, and there are few.
+#[expect(clippy::large_enum_variant)]
+pub enum ChatWire {
+    Ws(ChatConnection),
+    Requester(RequesterConnection),
+}
+
+impl ChatWire {
+    pub async fn send(&self, msg: Request, timeout: Duration) -> Result<ChatResponse, SendError> {
+        match self {
+            Self::Ws(connection) => connection.send(msg, timeout).await,
+            Self::Requester(requester) => requester.send_request(msg).await,
+        }
+    }
+
+    pub async fn disconnect(&self) {
+        match self {
+            Self::Ws(connection) => connection.disconnect().await,
+            Self::Requester(_) => {}
+        }
+    }
+
+    /// `None` for a requester: there is no socket to describe.
+    pub fn connection_info(&self) -> Option<&ConnectionInfo> {
+        match self {
+            Self::Ws(connection) => Some(connection.connection_info()),
+            Self::Requester(_) => None,
+        }
+    }
+
+    pub fn shared_h2_connection(&self) -> Option<Http2Client<GrpcBody>> {
+        match self {
+            Self::Ws(connection) => connection.shared_h2_connection(),
+            Self::Requester(_) => None,
+        }
+    }
+}
+
+impl WsConnection for ChatWire {
+    async fn send(
+        &self,
+        log_tag: &'static str,
+        log_safe_path: &str,
+        request: Request,
+    ) -> Result<ChatResponse, SendError> {
+        match self {
+            Self::Ws(connection) => {
+                WsConnection::send(connection, log_tag, log_safe_path, request).await
+            }
+            Self::Requester(requester) => {
+                WsConnection::send(requester, log_tag, log_safe_path, request).await
+            }
+        }
+    }
+
+    fn grpc_service_to_use_instead(
+        &self,
+        message: &'static str,
+    ) -> Option<impl GrpcServiceProvider> {
+        match self {
+            Self::Ws(connection) => connection.grpc_service_to_use_instead(message),
+            Self::Requester(_) => None,
+        }
+    }
+
+    fn self_aci(&self) -> Option<libsignal_core::Aci> {
+        match self {
+            Self::Ws(connection) => WsConnection::self_aci(connection),
+            Self::Requester(requester) => requester.self_aci,
+        }
+    }
+}
+
+/// What a [`ChatRequester`] hands back: an HTTP response, complete and undecoded.
+///
+/// `headers` are `Name: value` lines, one per header, as HTTP itself writes them. The decoders
+/// above the wire read `Content-Type` and `Retry-After` and expect the server's exact values
+/// (a reply with no body must carry no content type at all), so a requester forwards every
+/// header it received rather than choosing among them. `body` is empty for a response without
+/// one. Built through `ChatRequesterResponse_New`.
+pub struct ChatRequesterResponse {
+    pub status: u16,
+    pub headers: Box<[String]>,
+    pub body: Vec<u8>,
+}
+
+bridge_as_handle!(ChatRequesterResponse);
+
+/// The wire an app supplies for a chat connection that has no websocket.
+///
+/// `send` is one HTTP request at the chat server, made however the app likes, returning when
+/// the reply is in hand. It is synchronous by contract and is invoked off libsignal's async
+/// runtime, on a thread that exists to be blocked. `headers` are `Name: value` lines carrying
+/// everything libsignal would have sent down the socket for this request (the unidentified
+/// access key, the content type, ...); the app adds whatever its own transport needs. A
+/// connection that is authenticated at the socket sends no `Authorization` per request, so a
+/// requester standing in for an authenticated connection adds it. `body` is empty for a
+/// request without one.
+///
+/// A thrown error means the request never reached the server or the reply never came back. It
+/// is reported as a transport failure, which callers treat as retryable. A reply the server did
+/// send -- whatever its status -- is a response, not an error, so that each service's own
+/// status handling (rate limits, mismatched devices, rejections) applies to it.
+#[bridge_callbacks(jni = false, node = false)]
+pub trait ChatRequester: Send + Sync + UnwindSafe {
+    fn send(
+        &self,
+        method: String,
+        path: String,
+        headers: Box<[String]>,
+        body: Vec<u8>,
+    ) -> Result<ChatRequesterResponse, std::io::Error>;
+}
+
+/// A chat connection whose wire is a [`ChatRequester`].
+///
+/// Shared by `Arc` because each request runs on tokio's blocking pool, and the blocking task
+/// has to own what it calls.
+pub struct RequesterConnection {
+    requester: Arc<dyn ChatRequester>,
+    self_aci: Option<libsignal_core::Aci>,
+    next_request_id: AtomicU16,
+}
+
+impl RequesterConnection {
+    pub fn new(requester: Box<dyn ChatRequester>, self_aci: Option<libsignal_core::Aci>) -> Self {
+        Self {
+            requester: Arc::from(requester),
+            self_aci,
+            next_request_id: AtomicU16::new(0),
+        }
+    }
+
+    /// One request through the requester, on tokio's blocking pool: the callback is synchronous
+    /// by contract (C has to return before Rust continues), so it must not run on the worker
+    /// the caller is awaiting on.
+    ///
+    /// The requester's own failure is a transport error; a reply it cannot be blamed for -- a
+    /// status or header libsignal cannot represent -- is invalid incoming data. Both map to
+    /// [`libsignal_net_chat::api::DisconnectedError::Transport`] above.
+    async fn send_request(&self, request: Request) -> Result<ChatResponse, SendError> {
+        let Request {
+            method,
+            path,
+            headers,
+            body,
+        } = request;
+        let headers = headers
+            .iter()
+            .map(|(name, value)| {
+                let value = value
+                    .to_str()
+                    .map_err(|_| SendError::RequestHasInvalidHeader)?;
+                Ok(format!("{name}: {value}"))
+            })
+            .collect::<Result<Box<[String]>, SendError>>()?;
+        let requester = Arc::clone(&self.requester);
+        let response = tokio::task::spawn_blocking(move || {
+            requester.send(
+                method.to_string(),
+                path.to_string(),
+                headers,
+                body.map(Vec::from).unwrap_or_default(),
+            )
+        })
+        .await
+        .map_err(|join_error| {
+            log::error!("chat requester did not complete: {join_error}");
+            SendError::Disconnected
+        })?
+        .map_err(|error| SendError::WebSocket(WebSocketError::Io(error)))?;
+
+        let ChatRequesterResponse {
+            status,
+            headers,
+            body,
+        } = response;
+        let status = http::StatusCode::from_u16(status).map_err(|_| {
+            log::warn!("chat requester returned status {status}");
+            SendError::IncomingDataInvalid
+        })?;
+        let mut header_map = HeaderMap::with_capacity(headers.len());
+        for line in &headers {
+            let (name, value) = line.split_once(':').ok_or(SendError::IncomingDataInvalid)?;
+            let name =
+                HeaderName::from_str(name.trim()).map_err(|_| SendError::IncomingDataInvalid)?;
+            let value =
+                HeaderValue::from_str(value.trim()).map_err(|_| SendError::IncomingDataInvalid)?;
+            header_map.append(name, value);
+        }
+        let body = (!body.is_empty()).then(|| Bytes::from(body));
+        Ok(ChatResponse {
+            status,
+            message: None,
+            headers: header_map,
+            body,
+        })
+    }
+}
+
+impl WsConnection for RequesterConnection {
+    /// Logged the way [`ChatConnection`]'s sends are, so a request over a requester reads the
+    /// same in a log as one over the socket.
+    async fn send(
+        &self,
+        log_tag: &'static str,
+        log_safe_path: &str,
+        request: Request,
+    ) -> Result<ChatResponse, SendError> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let method = request.method.clone();
+        log::info!("[{log_tag} {request_id:04x}] {method} {log_safe_path}");
+
+        let result = self.send_request(request).await;
+
+        match &result {
+            Ok(response) => log::info!(
+                "[{log_tag} {request_id:04x}] {method} {log_safe_path} {}",
+                response.status
+            ),
+            Err(e) => log::warn!(
+                "[{log_tag} {request_id:04x}] {method} {log_safe_path} - {}",
+                e as &dyn LogSafeDisplay
+            ),
+        }
+
+        result
+    }
+
+    fn self_aci(&self) -> Option<libsignal_core::Aci> {
+        self.self_aci
+    }
+}
+
 impl UnauthenticatedChatConnection {
+    /// A connection with no socket: its requests go out through `requester`. Running from the
+    /// start; there is no listener to wait for, and nothing arrives unasked.
+    pub fn with_requester(requester: Box<dyn ChatRequester>) -> Self {
+        Self {
+            inner: MaybeChatConnection::Running(ChatWire::Requester(RequesterConnection::new(
+                requester, None,
+            )))
+            .into(),
+        }
+    }
+
     pub async fn connect(
         connection_manager: &ConnectionManager,
         languages: LanguageList,
@@ -149,7 +415,7 @@ impl UnauthenticatedChatConnection {
     pub async fn as_typed<'outer, F, R>(&'outer self, callback: F) -> R
     where
         F: for<'inner> FnOnce(
-            LimitedLifetimeRef<'outer, 'inner, Unauth<ChatConnection>>,
+            LimitedLifetimeRef<'outer, 'inner, Unauth<ChatWire>>,
         ) -> BoxFuture<'inner, R>,
     {
         let guard = self.as_ref().read().await;
@@ -208,6 +474,20 @@ impl AuthenticatedChatConnection {
         )
         .ok()?;
         Some((aci, device_id))
+    }
+
+    /// A connection with no socket: its requests go out through `requester`, which is
+    /// responsible for presenting the account's credentials on each of them. `aci` is the
+    /// account's own, as the socket would have learned it from its auth username; the services
+    /// that address the account itself (sync messages) read it from here.
+    pub fn with_requester(requester: Box<dyn ChatRequester>, aci: libsignal_core::Aci) -> Self {
+        Self {
+            inner: MaybeChatConnection::Running(ChatWire::Requester(RequesterConnection::new(
+                requester,
+                Some(aci),
+            )))
+            .into(),
+        }
     }
 
     pub async fn connect(
@@ -288,7 +568,7 @@ impl AuthenticatedChatConnection {
     pub async fn as_typed<'outer, F, R>(&'outer self, callback: F) -> R
     where
         F: for<'inner> FnOnce(
-            LimitedLifetimeRef<'outer, 'inner, AuthConn<ChatConnection>>,
+            LimitedLifetimeRef<'outer, 'inner, AuthConn<ChatWire>>,
         ) -> BoxFuture<'inner, R>,
     {
         let guard = self.as_ref().read().await;
@@ -409,9 +689,10 @@ impl<C: AsRef<tokio::sync::RwLock<MaybeChatConnection>> + Sync> BridgeChatConnec
     fn info(&self) -> ConnectionInfo {
         let guard = self.as_ref().blocking_read();
         match &*guard {
-            MaybeChatConnection::Running(chat_connection) => {
-                chat_connection.connection_info().clone()
-            }
+            MaybeChatConnection::Running(chat_connection) => chat_connection
+                .connection_info()
+                .expect("a requester-backed connection has no socket to describe")
+                .clone(),
             MaybeChatConnection::WaitingForListener {
                 runtime: _,
                 pending,
@@ -466,12 +747,12 @@ fn init_listener(connection: &mut MaybeChatConnection, listener: chat::ws::Event
             MaybeChatConnection::TemporarilyEvicted => panic!("should be a temporary state"),
         };
 
-    *connection = MaybeChatConnection::Running(ChatConnection::finish_connect(
+    *connection = MaybeChatConnection::Running(ChatWire::Ws(ChatConnection::finish_connect(
         tokio_runtime,
         pending.into_inner(),
         grpc_overrides,
         listener,
-    ))
+    )))
 }
 
 pub struct FakeChatConnection(ChatConnection);
@@ -491,21 +772,21 @@ impl FakeChatConnection {
     pub fn into_unauthenticated(self) -> UnauthenticatedChatConnection {
         let Self(inner) = self;
         UnauthenticatedChatConnection {
-            inner: MaybeChatConnection::Running(inner).into(),
+            inner: MaybeChatConnection::Running(ChatWire::Ws(inner)).into(),
         }
     }
 
     pub fn into_authenticated(self) -> AuthenticatedChatConnection {
         let Self(inner) = self;
         AuthenticatedChatConnection {
-            inner: MaybeChatConnection::Running(inner).into(),
+            inner: MaybeChatConnection::Running(ChatWire::Ws(inner)).into(),
         }
     }
 
     pub fn into_provisioning(self) -> ProvisioningChatConnection {
         let Self(inner) = self;
         ProvisioningChatConnection {
-            inner: MaybeChatConnection::Running(inner).into(),
+            inner: MaybeChatConnection::Running(ChatWire::Ws(inner)).into(),
         }
     }
 }
@@ -1261,5 +1542,173 @@ mod test {
             .await
             .expect("in-flight next_chunk should resolve once cancelled");
         assert_matches!(result, Err(StreamCancelled));
+    }
+}
+
+/// A typed service over a [`ChatRequester`]: the seam, exercised without the FFI.
+///
+/// `account_exists` is the service used because it is the smallest one (a HEAD, a status), so
+/// what these tests see is the wire's own behaviour: how the request reaches the requester, how
+/// the reply's status and headers come back through libsignal's decoders, and which errors are
+/// the requester's and which are the server's.
+#[cfg(test)]
+mod requester_tests {
+    use std::sync::Mutex;
+
+    use assert_matches::assert_matches;
+    use libsignal_net::infra::errors::RetryLater;
+    use libsignal_net_chat::api::DisconnectedError;
+    use libsignal_net_chat::api::profiles::UnauthenticatedAccountExistenceApi as _;
+
+    use super::*;
+
+    const ACI: libsignal_core::Aci = libsignal_core::Aci::from_uuid_bytes(
+        uuid::uuid!("659aa5f4-a28d-fcc1-1ea1-b997537a3d95").into_bytes(),
+    );
+
+    struct Seen {
+        method: String,
+        path: String,
+        headers: Vec<String>,
+        body: Vec<u8>,
+    }
+
+    /// Answers every request the same way and records what it was asked, through a handle the
+    /// test keeps after the connection has taken ownership of the requester.
+    struct Canned {
+        status: u16,
+        headers: Vec<&'static str>,
+        body: &'static [u8],
+        failure: Option<&'static str>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl Canned {
+        fn answering(status: u16, headers: &[&'static str], body: &'static [u8]) -> Self {
+            Self {
+                status,
+                headers: headers.to_vec(),
+                body,
+                failure: None,
+                seen: Default::default(),
+            }
+        }
+
+        fn failing(reason: &'static str) -> Self {
+            Self {
+                failure: Some(reason),
+                ..Self::answering(0, &[], b"")
+            }
+        }
+    }
+
+    impl ChatRequester for Canned {
+        fn send(
+            &self,
+            method: String,
+            path: String,
+            headers: Box<[String]>,
+            body: Vec<u8>,
+        ) -> Result<ChatRequesterResponse, std::io::Error> {
+            self.seen.lock().expect("not poisoned").push(Seen {
+                method,
+                path,
+                headers: headers.into_vec(),
+                body,
+            });
+            if let Some(reason) = self.failure {
+                return Err(std::io::Error::other(reason));
+            }
+            Ok(ChatRequesterResponse {
+                status: self.status,
+                headers: self.headers.iter().map(|h| h.to_string()).collect(),
+                body: self.body.to_vec(),
+            })
+        }
+    }
+
+    async fn account_exists(
+        requester: Canned,
+    ) -> (Result<bool, RequestError<Infallible>>, Vec<Seen>) {
+        let seen = Arc::clone(&requester.seen);
+        let connection = UnauthenticatedChatConnection::with_requester(Box::new(requester));
+        let result = connection
+            .as_typed(|chat| chat.account_exists(ACI.into()))
+            .await;
+        let seen = std::mem::take(&mut *seen.lock().expect("not poisoned"));
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn a_typed_service_runs_over_the_requester() {
+        let (result, seen) = account_exists(Canned::answering(200, &[], b"")).await;
+        assert_matches!(result, Ok(true));
+        let [request] = seen.as_slice() else {
+            panic!("expected one request, saw {}", seen.len())
+        };
+        assert_eq!(request.method, "HEAD");
+        assert_eq!(
+            request.path,
+            "/v1/accounts/account/659aa5f4-a28d-fcc1-1ea1-b997537a3d95"
+        );
+        assert!(request.headers.is_empty(), "{:?}", request.headers);
+        assert!(request.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_servers_answer_is_the_services_answer() {
+        let (result, _) = account_exists(Canned::answering(404, &[], b"")).await;
+        assert_matches!(result, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn response_headers_reach_the_decoder() {
+        let (result, _) = account_exists(Canned::answering(
+            429,
+            &["Content-Type: application/json", "Retry-After: 7"],
+            b"{}",
+        ))
+        .await;
+        assert_matches!(
+            result,
+            Err(RequestError::RetryLater(RetryLater {
+                retry_after_seconds: 7
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_requesters_failure_is_a_transport_error() {
+        let (result, seen) = account_exists(Canned::failing("the proxy is down")).await;
+        assert_matches!(
+            result,
+            Err(RequestError::Disconnected(
+                DisconnectedError::Transport { .. }
+            ))
+        );
+        assert_eq!(seen.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reply_libsignal_cannot_represent_is_a_transport_error() {
+        let (result, _) = account_exists(Canned::answering(200, &["not a header"], b"")).await;
+        assert_matches!(
+            result,
+            Err(RequestError::Disconnected(
+                DisconnectedError::Transport { .. }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_connection_knows_its_own_aci() {
+        let connection = AuthenticatedChatConnection::with_requester(
+            Box::new(Canned::answering(200, &[], b"")),
+            ACI,
+        );
+        let aci = connection
+            .as_typed(|chat| Box::pin(async move { WsConnection::self_aci(&chat.0) }))
+            .await;
+        assert_eq!(aci, Some(ACI));
     }
 }

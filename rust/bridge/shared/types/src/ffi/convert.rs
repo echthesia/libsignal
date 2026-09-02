@@ -24,8 +24,8 @@ use crate::crypto::RandomNumberGenerator;
 use crate::ffi;
 use crate::io::{InputStream, SyncInputStream};
 use crate::net::chat::{
-    ChatListener, FfiChatListenerStruct, FfiProvisioningListenerStruct, PreKeysResponse,
-    ProvisioningListener,
+    ChatListener, ChatRequester, FfiChatListenerStruct, FfiChatRequesterStruct,
+    FfiProvisioningListenerStruct, PreKeysResponse, ProvisioningListener,
 };
 use crate::net::registration::{
     ConnectChatBridge, RegistrationCreateSessionRequest, RegistrationPushToken,
@@ -972,6 +972,28 @@ impl ArgTypeInfoBase for Box<dyn ProvisioningListener> {
 }
 impl<'a> ArgTypeInfo<'a> for Box<dyn ProvisioningListener> {
     type StoredType = Option<Box<dyn ProvisioningListener>>;
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn borrow(foreign: Self::ArgType) -> SignalFfiResult<Self::StoredType> {
+        Ok(Some(unsafe {
+            Box::new(OwnedCallbackStruct(
+                foreign
+                    .into_inner()
+                    .as_ref()
+                    .ok_or(NullPointerError)?
+                    .clone(),
+            ))
+        }))
+    }
+    fn load_from(stored: &'a mut Self::StoredType) -> Self {
+        stored.take().expect("not previously taken")
+    }
+}
+
+impl ArgTypeInfoBase for Box<dyn ChatRequester> {
+    type ArgType = crate::ffi::ConstPointer<FfiChatRequesterStruct>;
+}
+impl<'a> ArgTypeInfo<'a> for Box<dyn ChatRequester> {
+    type StoredType = Option<Box<dyn ChatRequester>>;
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn borrow(foreign: Self::ArgType) -> SignalFfiResult<Self::StoredType> {
         Ok(Some(unsafe {

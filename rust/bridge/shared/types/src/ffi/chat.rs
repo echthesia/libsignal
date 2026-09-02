@@ -16,13 +16,20 @@ use super::*;
 use crate::net::ConnectionManager;
 // TODO: This re-export is because of the ffi_arg_type macro expecting all bridging structs to be
 // under the ffi module; eventually we should be able to remove it.
-pub use crate::net::chat::{FfiChatListenerStruct, FfiProvisioningListenerStruct};
+pub use crate::net::chat::{
+    FfiChatListenerStruct, FfiChatRequesterStruct, FfiProvisioningListenerStruct,
+};
 use crate::net::registration::ConnectChatBridge;
 
 // SAFETY: Chat listeners are used from multiple threads. It's up to the creator of the C struct to
 // make sure `ctx` is appropriate for this.
 unsafe impl Send for FfiChatListenerStruct {}
 unsafe impl Send for FfiProvisioningListenerStruct {}
+// SAFETY: A chat requester is shared by every request its connection sends and is called from
+// tokio's blocking pool; as above, `ctx` has to be usable from any thread, which the app promises
+// by handing over a thread-safe object.
+unsafe impl Send for FfiChatRequesterStruct {}
+unsafe impl Sync for FfiChatRequesterStruct {}
 
 type GetConnectChatConnectionManager = extern "C" fn(ctx: *mut c_void) -> *const ConnectionManager;
 type DestroyConnectChatBridge = extern "C" fn(ctx: *mut c_void);

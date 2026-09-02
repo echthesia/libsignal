@@ -851,6 +851,35 @@ static_assert_64bit(alignof(SignalFfiChatListenerStruct) == 8);
 typedef const SignalFfiChatListenerStruct* SignalType_ConstPointer_SignalFfiChatListenerStruct;
 static_assert_64bit(sizeof(SignalType_ConstPointer_SignalFfiChatListenerStruct) == 8);
 static_assert_64bit(alignof(SignalType_ConstPointer_SignalFfiChatListenerStruct) == 8);
+typedef struct SignalChatRequesterResponse SignalChatRequesterResponse;
+typedef SignalChatRequesterResponse* SignalType_MutPointer_SignalChatRequesterResponse;
+static_assert_64bit(sizeof(SignalType_MutPointer_SignalChatRequesterResponse) == 8);
+static_assert_64bit(alignof(SignalType_MutPointer_SignalChatRequesterResponse) == 8);
+typedef struct {
+  SignalChatRequesterResponse* raw;
+} SignalMutPointerChatRequesterResponse;
+static_assert_64bit(offsetof(SignalMutPointerChatRequesterResponse, raw) == 0);
+static_assert_64bit(sizeof(SignalMutPointerChatRequesterResponse) == 8);
+static_assert_64bit(alignof(SignalMutPointerChatRequesterResponse) == 8);
+typedef SignalMutPointerChatRequesterResponse* SignalType_MutPointer_SignalMutPointerChatRequesterResponse;
+static_assert_64bit(sizeof(SignalType_MutPointer_SignalMutPointerChatRequesterResponse) == 8);
+static_assert_64bit(alignof(SignalType_MutPointer_SignalMutPointerChatRequesterResponse) == 8);
+typedef int32_t (*SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerChatRequesterResponse_SignalCStringPtr_SignalCStringPtr_SignalBytestringArray_SignalOwnedBuffer)(SignalType_MutPointer_void, SignalType_MutPointer_SignalMutPointerChatRequesterResponse, SignalCStringPtr, SignalCStringPtr, SignalBytestringArray, SignalOwnedBuffer);
+static_assert_64bit(sizeof(SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerChatRequesterResponse_SignalCStringPtr_SignalCStringPtr_SignalBytestringArray_SignalOwnedBuffer) == 8);
+static_assert_64bit(alignof(SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerChatRequesterResponse_SignalCStringPtr_SignalCStringPtr_SignalBytestringArray_SignalOwnedBuffer) == 8);
+typedef struct {
+  void* ctx;
+  SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerChatRequesterResponse_SignalCStringPtr_SignalCStringPtr_SignalBytestringArray_SignalOwnedBuffer send;
+  SignalType_FunctionPointer_void_SignalType_MutPointer_void destroy;
+} SignalFfiChatRequesterStruct;
+static_assert_64bit(offsetof(SignalFfiChatRequesterStruct, ctx) == 0);
+static_assert_64bit(offsetof(SignalFfiChatRequesterStruct, send) == 8);
+static_assert_64bit(offsetof(SignalFfiChatRequesterStruct, destroy) == 16);
+static_assert_64bit(sizeof(SignalFfiChatRequesterStruct) == 24);
+static_assert_64bit(alignof(SignalFfiChatRequesterStruct) == 8);
+typedef const SignalFfiChatRequesterStruct* SignalType_ConstPointer_SignalFfiChatRequesterStruct;
+static_assert_64bit(sizeof(SignalType_ConstPointer_SignalFfiChatRequesterStruct) == 8);
+static_assert_64bit(alignof(SignalType_ConstPointer_SignalFfiChatRequesterStruct) == 8);
 typedef int32_t (*SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalCStringPtr_SignalMutPointerServerMessageAck)(SignalType_MutPointer_void, SignalCStringPtr, SignalMutPointerServerMessageAck);
 static_assert_64bit(sizeof(SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalCStringPtr_SignalMutPointerServerMessageAck) == 8);
 static_assert_64bit(alignof(SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalCStringPtr_SignalMutPointerServerMessageAck) == 8);
@@ -1542,6 +1571,9 @@ static_assert_64bit(alignof(SignalMutPointerLookupRequest) == 8);
 typedef SignalMutPointerLookupRequest* SignalType_MutPointer_SignalMutPointerLookupRequest;
 static_assert_64bit(sizeof(SignalType_MutPointer_SignalMutPointerLookupRequest) == 8);
 static_assert_64bit(alignof(SignalType_MutPointer_SignalMutPointerLookupRequest) == 8);
+typedef SignalMutPointerAuthenticatedChatConnection* SignalType_MutPointer_SignalMutPointerAuthenticatedChatConnection;
+static_assert_64bit(sizeof(SignalType_MutPointer_SignalMutPointerAuthenticatedChatConnection) == 8);
+static_assert_64bit(alignof(SignalType_MutPointer_SignalMutPointerAuthenticatedChatConnection) == 8);
 typedef SignalCopyBackupMediaStream* SignalType_MutPointer_SignalCopyBackupMediaStream;
 static_assert_64bit(sizeof(SignalType_MutPointer_SignalCopyBackupMediaStream) == 8);
 static_assert_64bit(alignof(SignalType_MutPointer_SignalCopyBackupMediaStream) == 8);
@@ -1578,6 +1610,9 @@ static_assert_64bit(alignof(SignalMutPointerHttpRequest) == 8);
 typedef SignalMutPointerHttpRequest* SignalType_MutPointer_SignalMutPointerHttpRequest;
 static_assert_64bit(sizeof(SignalType_MutPointer_SignalMutPointerHttpRequest) == 8);
 static_assert_64bit(alignof(SignalType_MutPointer_SignalMutPointerHttpRequest) == 8);
+typedef SignalMutPointerUnauthenticatedChatConnection* SignalType_MutPointer_SignalMutPointerUnauthenticatedChatConnection;
+static_assert_64bit(sizeof(SignalType_MutPointer_SignalMutPointerUnauthenticatedChatConnection) == 8);
+static_assert_64bit(alignof(SignalType_MutPointer_SignalMutPointerUnauthenticatedChatConnection) == 8);
 typedef SignalRegistrationAccountAttributes* SignalType_MutPointer_SignalRegistrationAccountAttributes;
 static_assert_64bit(sizeof(SignalType_MutPointer_SignalRegistrationAccountAttributes) == 8);
 static_assert_64bit(alignof(SignalType_MutPointer_SignalRegistrationAccountAttributes) == 8);
@@ -2626,6 +2661,12 @@ static_assert_64bit(offsetof(SignalConstPointerFfiChatListenerStruct, raw) == 0)
 static_assert_64bit(sizeof(SignalConstPointerFfiChatListenerStruct) == 8);
 static_assert_64bit(alignof(SignalConstPointerFfiChatListenerStruct) == 8);
 typedef struct {
+  const SignalFfiChatRequesterStruct* raw;
+} SignalConstPointerFfiChatRequesterStruct;
+static_assert_64bit(offsetof(SignalConstPointerFfiChatRequesterStruct, raw) == 0);
+static_assert_64bit(sizeof(SignalConstPointerFfiChatRequesterStruct) == 8);
+static_assert_64bit(alignof(SignalConstPointerFfiChatRequesterStruct) == 8);
+typedef struct {
   const SignalFfiProvisioningListenerStruct* raw;
 } SignalConstPointerFfiProvisioningListenerStruct;
 static_assert_64bit(offsetof(SignalConstPointerFfiProvisioningListenerStruct, raw) == 0);
@@ -3267,6 +3308,11 @@ SignalFfiError* signal_authenticated_chat_connection_init_listener(
   SignalConstPointerAuthenticatedChatConnection chat,
   SignalConstPointerFfiChatListenerStruct listener
 );
+SignalFfiError* signal_authenticated_chat_connection_new_with_requester(
+  SignalMutPointerAuthenticatedChatConnection* out,
+  SignalConstPointerFfiChatRequesterStruct requester,
+  const int8_t* username
+);
 SignalFfiError* signal_authenticated_chat_connection_preconnect(
   SignalCPromisebool* promise,
   SignalConstPointerTokioAsyncContext async_runtime,
@@ -3669,6 +3715,15 @@ SignalFfiError* signal_chat_connection_info_ip_version(
 SignalFfiError* signal_chat_connection_info_local_port(
   uint16_t* out,
   SignalConstPointerChatConnectionInfo connection_info
+);
+SignalFfiError* signal_chat_requester_response_destroy(
+  SignalMutPointerChatRequesterResponse p
+);
+SignalFfiError* signal_chat_requester_response_new(
+  SignalMutPointerChatRequesterResponse* out,
+  uint32_t status,
+  SignalBorrowedBytestringArray headers,
+  SignalBorrowedBuffer body
 );
 SignalFfiError* signal_ciphertext_message_destroy(
   SignalMutPointerCiphertextMessage p
@@ -5965,6 +6020,10 @@ SignalFfiError* signal_unauthenticated_chat_connection_look_up_username_link(
   SignalUuid uuid,
   SignalBorrowedBuffer entropy
 );
+SignalFfiError* signal_unauthenticated_chat_connection_new_with_requester(
+  SignalMutPointerUnauthenticatedChatConnection* out,
+  SignalConstPointerFfiChatRequesterStruct requester
+);
 SignalFfiError* signal_unauthenticated_chat_connection_send(
   SignalCPromiseFfiChatResponse* promise,
   SignalConstPointerTokioAsyncContext async_runtime,
@@ -6168,6 +6227,7 @@ typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalOwne
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalOwnedBuffer_uint64_t_SignalMutPointerServerMessageAck SignalFfiChatListenerReceivedIncomingMessage;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalFfiError SignalFfiChatListenerConnectionInterrupted;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalFfiError SignalFfiProvisioningListenerConnectionInterrupted;
+typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerChatRequesterResponse_SignalCStringPtr_SignalCStringPtr_SignalBytestringArray_SignalOwnedBuffer SignalFfiChatRequesterSend;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerKyberPreKeyRecord_uint32_t SignalFfiKyberPreKeyStoreLoadKyberPreKey;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerPreKeyRecord_uint32_t SignalFfiPreKeyStoreLoadPreKey;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_SignalType_MutPointer_SignalMutPointerPublicKey_SignalMutPointerProtocolAddress SignalFfiIdentityKeyStoreGetIdentityKey;
@@ -6187,6 +6247,7 @@ typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_uint32_t_u
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_uint64_t SignalFfiChatListenerReceivedServerTimestamp;
 typedef SignalType_FunctionPointer_int32_t_SignalType_MutPointer_void_uint64_t SignalFfiSyncInputStreamSkip;
 typedef SignalType_FunctionPointer_void_SignalType_MutPointer_void SignalFfiChatListenerDestroy;
+typedef SignalType_FunctionPointer_void_SignalType_MutPointer_void SignalFfiChatRequesterDestroy;
 typedef SignalType_FunctionPointer_void_SignalType_MutPointer_void SignalFfiIdentityKeyStoreDestroy;
 typedef SignalType_FunctionPointer_void_SignalType_MutPointer_void SignalFfiKyberPreKeyStoreDestroy;
 typedef SignalType_FunctionPointer_void_SignalType_MutPointer_void SignalFfiLoggerDestroy;

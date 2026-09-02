@@ -52,6 +52,48 @@ bridge_handle_fns!(AuthenticatedChatConnection, clone = false);
 bridge_handle_fns!(ProvisioningChatConnection, clone = false);
 bridge_handle_fns!(CopyBackupMediaStream, clone = false);
 bridge_handle_fns!(DeleteBackupMediaStream, clone = false);
+bridge_handle_fns!(ChatRequesterResponse, clone = false, jni = false);
+
+/// An unauthenticated chat connection with no socket: every request goes out through
+/// `requester`, and every typed service runs over it unchanged (see `ChatWire`). Nothing to
+/// connect and no listener to start; the connection is usable as soon as it exists.
+#[bridge_fn(jni = false, node = false)]
+fn UnauthenticatedChatConnection_new_with_requester(
+    requester: Box<dyn ChatRequester>,
+) -> UnauthenticatedChatConnection {
+    UnauthenticatedChatConnection::with_requester(requester)
+}
+
+/// [`UnauthenticatedChatConnection_new_with_requester`] for the authenticated connection.
+///
+/// `username` is the account's HTTP auth username, `{aci}` or `{aci}.{deviceId}`, exactly as
+/// `AuthenticatedChatConnection_connect` takes it; the connection keeps the ACI for the services
+/// that address the account itself. Presenting the credentials is the requester's job.
+#[bridge_fn(jni = false, node = false)]
+fn AuthenticatedChatConnection_new_with_requester(
+    requester: Box<dyn ChatRequester>,
+    username: String,
+) -> AuthenticatedChatConnection {
+    let (aci, _device_id) = AuthenticatedChatConnection::parse_username(&username)
+        .expect("username must be of the form {ACI}.{deviceId}");
+    AuthenticatedChatConnection::with_requester(requester, aci)
+}
+
+/// What a `ChatRequester` hands back. `status` is the HTTP status code, `headers` the response
+/// headers as `Name: value` lines (all of them, as received), and `body` the response body,
+/// complete and undecoded, empty for a response without one.
+#[bridge_fn(jni = false, node = false)]
+fn ChatRequesterResponse_New(
+    status: u32,
+    headers: Box<[String]>,
+    body: &[u8],
+) -> ChatRequesterResponse {
+    ChatRequesterResponse {
+        status: status.try_into().unwrap_or(u16::MAX),
+        headers,
+        body: body.to_vec(),
+    }
+}
 
 #[bridge_fn(ffi = false)]
 fn HttpRequest_new(

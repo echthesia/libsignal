@@ -15,7 +15,7 @@
 // swiftlint:disable explicit_init_for_public_struct
 
 {% if testing %}
-#if !os(iOS) || targetEnvironment(simulator)
+#if !(os(iOS) || os(watchOS)) || targetEnvironment(simulator)
 {% endif %}
 
 import Foundation
