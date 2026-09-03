@@ -194,13 +194,15 @@ internal final class ChatRequesterBridge: @unchecked Sendable {
     /// call that is still queued runs anyway once its handle is dropped -- so on a busy pool the
     /// cancellation gets here first. Remembering it is what keeps that `send` from putting a
     /// request nobody wants on the wire. Each id is taken out again by the `send` it was waiting
-    /// for; what would stay is an id whose blocking call never ran at all, which happens only if
-    /// the runtime is going away, and the whole bridge goes with it.
+    /// for. What would stay is a `cancel` that landed after its `send` had returned but before
+    /// Rust saw it return, or an id whose blocking call never ran because the runtime went away;
+    /// neither can be told from a not-yet-started `send` at the time it arrives, so the set is
+    /// capped instead and forgets its oldest ids. Ids are handed out in order by the connection
+    /// this bridge belongs to, so the smallest is the oldest, and a request that far behind is
+    /// not still waiting to start. (The order `send`s *start* in is the blocking pool's, not the
+    /// ids', so the highest id started says nothing about which lower ones are still queued.)
     private var cancelledBeforeSend: Set<UInt64> = []
-    /// The highest id `send` has been entered for. Ids are handed out in order by the connection
-    /// this bridge belongs to, so it is what separates a `cancel` for a request that has not
-    /// started from one for a request that has already finished.
-    private var highestStarted: UInt64?
+    private static let cancelledBeforeSendCapacity = 64
 
     init(_ requester: any ChatRequester) {
         self.requester = requester
@@ -211,7 +213,6 @@ internal final class ChatRequesterBridge: @unchecked Sendable {
         let cancellation = ChatRequestCancellation()
         let alreadyCancelled = self.lock.withLock { () -> Bool in
             self.inFlight[requestId] = cancellation
-            self.highestStarted = max(self.highestStarted ?? requestId, requestId)
             return self.cancelledBeforeSend.remove(requestId) != nil
         }
         if alreadyCancelled {
@@ -226,17 +227,20 @@ internal final class ChatRequesterBridge: @unchecked Sendable {
 
     /// Fires `requestId`'s cancellation, outside the lock.
     ///
-    /// Nothing in flight under that id means one of two things, and they are told apart by the
-    /// order ids are handed out in: a `send` that has already returned, where the cancellation
-    /// has nothing left to reach and is dropped, or a `send` that has yet to start, which is
-    /// remembered for it.
+    /// Nothing in flight under that id means either a `send` that has yet to start, which must
+    /// find the cancellation waiting for it, or one that has already returned, where there is
+    /// nothing left to reach. They cannot be told apart here, so the id is remembered either
+    /// way and the table's cap is what keeps the second kind from accumulating.
     private func cancelRequest(_ requestId: UInt64) {
         let cancellation = self.lock.withLock { () -> ChatRequestCancellation? in
             if let cancellation = self.inFlight[requestId] {
                 return cancellation
             }
-            if self.highestStarted.map({ requestId > $0 }) ?? true {
-                self.cancelledBeforeSend.insert(requestId)
+            self.cancelledBeforeSend.insert(requestId)
+            if self.cancelledBeforeSend.count > Self.cancelledBeforeSendCapacity,
+                let oldest = self.cancelledBeforeSend.min()
+            {
+                self.cancelledBeforeSend.remove(oldest)
             }
             return nil
         }
