@@ -9,7 +9,7 @@ use std::future::Future;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use atomic_take::AtomicTake;
@@ -147,7 +147,10 @@ impl ChatWire {
     pub async fn send(&self, msg: Request, timeout: Duration) -> Result<ChatResponse, SendError> {
         match self {
             Self::Ws(connection) => connection.send(msg, timeout).await,
-            Self::Requester(requester) => requester.send_request(msg).await,
+            Self::Requester(requester) => {
+                let request_id = requester.allocate_request_id();
+                requester.send_request(msg, request_id).await
+            }
         }
     }
 
@@ -239,15 +242,30 @@ bridge_as_handle!(ChatRequesterResponse);
 /// is reported as a transport failure, which callers treat as retryable. A reply the server did
 /// send -- whatever its status -- is a response, not an error, so that each service's own
 /// status handling (rate limits, mismatched devices, rejections) applies to it.
+///
+/// `cancel` says that nobody is waiting for `request_id` any more: the caller's future was
+/// dropped while that request was still in flight. It may arrive on any thread and at any point
+/// in that request's life -- during its `send`, after `send` has returned (where it means
+/// nothing and is to be ignored), and even before `send` is entered, because a blocking call
+/// that is still queued when its handle is dropped is run anyway. It arrives at most once per
+/// id, and only for an id that has been or will be passed to `send`.
+///
+/// A requester that ignores it altogether is still correct; it just holds the wire, and the
+/// thread `send` is blocking, until the reply or its own timeout arrives. `send`'s return value
+/// after a `cancel` is discarded, so it may return however it likes -- an error is the natural
+/// one.
 #[bridge_callbacks(jni = false, node = false)]
 pub trait ChatRequester: Send + Sync + UnwindSafe {
     fn send(
         &self,
+        request_id: u64,
         method: String,
         path: String,
         headers: Box<[String]>,
         body: Vec<u8>,
     ) -> Result<ChatRequesterResponse, std::io::Error>;
+
+    fn cancel(&self, request_id: u64);
 }
 
 /// A chat connection whose wire is a [`ChatRequester`].
@@ -257,7 +275,34 @@ pub trait ChatRequester: Send + Sync + UnwindSafe {
 pub struct RequesterConnection {
     requester: Arc<dyn ChatRequester>,
     self_aci: Option<libsignal_core::Aci>,
-    next_request_id: AtomicU16,
+    next_request_id: AtomicU64,
+}
+
+/// Tells the requester to let go of a request nobody is waiting for any more.
+///
+/// [`RequesterConnection::send_request`] arms one of these around the blocking call and disarms
+/// it the instant that call returns, so `Drop` runs with it still armed only when the future was
+/// dropped mid-flight -- which is what a cancelled caller looks like from here, the bridged
+/// future being `select!`ed against cancellation and dropped. It holds the requester by `Arc`
+/// because the connection that owns it may be dropped in the same breath.
+struct CancelOnDrop {
+    requester: Arc<dyn ChatRequester>,
+    request_id: u64,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.requester.cancel(self.request_id);
+        }
+    }
 }
 
 impl RequesterConnection {
@@ -265,8 +310,14 @@ impl RequesterConnection {
         Self {
             requester: Arc::from(requester),
             self_aci,
-            next_request_id: AtomicU16::new(0),
+            next_request_id: AtomicU64::new(0),
         }
+    }
+
+    /// The number this request is known by on both sides of the seam: the one its log lines
+    /// carry, and the one `cancel` names if its future is dropped.
+    fn allocate_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// One request through the requester, on tokio's blocking pool: the callback is synchronous
@@ -276,7 +327,15 @@ impl RequesterConnection {
     /// The requester's own failure is a transport error; a reply it cannot be blamed for -- a
     /// status or header libsignal cannot represent -- is invalid incoming data. Both map to
     /// [`libsignal_net_chat::api::DisconnectedError::Transport`] above.
-    async fn send_request(&self, request: Request) -> Result<ChatResponse, SendError> {
+    ///
+    /// Dropping this future is how a cancelled caller reaches the requester. It drops the
+    /// `spawn_blocking` join handle, which abandons the blocking call rather than stopping it,
+    /// so [`CancelOnDrop`] tells the requester by id that the reply is no longer wanted.
+    async fn send_request(
+        &self,
+        request: Request,
+        request_id: u64,
+    ) -> Result<ChatResponse, SendError> {
         let Request {
             method,
             path,
@@ -293,20 +352,30 @@ impl RequesterConnection {
             })
             .collect::<Result<Box<[String]>, SendError>>()?;
         let requester = Arc::clone(&self.requester);
-        let response = tokio::task::spawn_blocking(move || {
+        let cancel_on_drop = CancelOnDrop {
+            requester: Arc::clone(&self.requester),
+            request_id,
+            armed: true,
+        };
+        let joined = tokio::task::spawn_blocking(move || {
             requester.send(
+                request_id,
                 method.to_string(),
                 path.to_string(),
                 headers,
                 body.map(Vec::from).unwrap_or_default(),
             )
         })
-        .await
-        .map_err(|join_error| {
-            log::error!("chat requester did not complete: {join_error}");
-            SendError::Disconnected
-        })?
-        .map_err(|error| SendError::WebSocket(WebSocketError::Io(error)))?;
+        .await;
+        // Before `?`: whichever way the call ended, it ended, and a request that has been
+        // answered is not one to cancel.
+        cancel_on_drop.disarm();
+        let response = joined
+            .map_err(|join_error| {
+                log::error!("chat requester did not complete: {join_error}");
+                SendError::Disconnected
+            })?
+            .map_err(|error| SendError::WebSocket(WebSocketError::Io(error)))?;
 
         let ChatRequesterResponse {
             status,
@@ -345,11 +414,11 @@ impl WsConnection for RequesterConnection {
         log_safe_path: &str,
         request: Request,
     ) -> Result<ChatResponse, SendError> {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.allocate_request_id();
         let method = request.method.clone();
         log::info!("[{log_tag} {request_id:04x}] {method} {log_safe_path}");
 
-        let result = self.send_request(request).await;
+        let result = self.send_request(request, request_id).await;
 
         match &result {
             Ok(response) => log::info!(
@@ -1567,20 +1636,28 @@ mod requester_tests {
     );
 
     struct Seen {
+        request_id: u64,
         method: String,
         path: String,
         headers: Vec<String>,
         body: Vec<u8>,
     }
 
-    /// Answers every request the same way and records what it was asked, through a handle the
-    /// test keeps after the connection has taken ownership of the requester.
+    /// What a test keeps hold of after the connection has taken ownership of the requester:
+    /// every request it was asked to make, and every id it was told to let go of.
+    #[derive(Default)]
+    struct Record {
+        seen: Mutex<Vec<Seen>>,
+        cancelled: Mutex<Vec<u64>>,
+    }
+
+    /// Answers every request the same way and records what it was asked.
     struct Canned {
         status: u16,
         headers: Vec<&'static str>,
         body: &'static [u8],
         failure: Option<&'static str>,
-        seen: Arc<Mutex<Vec<Seen>>>,
+        record: Arc<Record>,
     }
 
     impl Canned {
@@ -1590,7 +1667,7 @@ mod requester_tests {
                 headers: headers.to_vec(),
                 body,
                 failure: None,
-                seen: Default::default(),
+                record: Default::default(),
             }
         }
 
@@ -1605,12 +1682,14 @@ mod requester_tests {
     impl ChatRequester for Canned {
         fn send(
             &self,
+            request_id: u64,
             method: String,
             path: String,
             headers: Box<[String]>,
             body: Vec<u8>,
         ) -> Result<ChatRequesterResponse, std::io::Error> {
-            self.seen.lock().expect("not poisoned").push(Seen {
+            self.record.seen.lock().expect("not poisoned").push(Seen {
+                request_id,
                 method,
                 path,
                 headers: headers.into_vec(),
@@ -1625,27 +1704,47 @@ mod requester_tests {
                 body: self.body.to_vec(),
             })
         }
+
+        fn cancel(&self, request_id: u64) {
+            self.record
+                .cancelled
+                .lock()
+                .expect("not poisoned")
+                .push(request_id);
+        }
     }
 
     async fn account_exists(
         requester: Canned,
-    ) -> (Result<bool, RequestError<Infallible>>, Vec<Seen>) {
-        let seen = Arc::clone(&requester.seen);
+    ) -> (Result<bool, RequestError<Infallible>>, Arc<Record>) {
+        let record = Arc::clone(&requester.record);
         let connection = UnauthenticatedChatConnection::with_requester(Box::new(requester));
         let result = connection
             .as_typed(|chat| chat.account_exists(ACI.into()))
             .await;
-        let seen = std::mem::take(&mut *seen.lock().expect("not poisoned"));
-        (result, seen)
+        (result, record)
+    }
+
+    fn requests(record: &Record) -> std::sync::MutexGuard<'_, Vec<Seen>> {
+        record.seen.lock().expect("not poisoned")
+    }
+
+    fn cancelled(record: &Record) -> Vec<u64> {
+        record.cancelled.lock().expect("not poisoned").clone()
     }
 
     #[tokio::test]
     async fn a_typed_service_runs_over_the_requester() {
-        let (result, seen) = account_exists(Canned::answering(200, &[], b"")).await;
+        let (result, record) = account_exists(Canned::answering(200, &[], b"")).await;
         assert_matches!(result, Ok(true));
+        let seen = requests(&record);
         let [request] = seen.as_slice() else {
             panic!("expected one request, saw {}", seen.len())
         };
+        // The id a requester is handed is the connection's own count, from zero, and is the
+        // number the request's log lines carry -- so a `cancel` naming it can be matched
+        // against them.
+        assert_eq!(request.request_id, 0);
         assert_eq!(request.method, "HEAD");
         assert_eq!(
             request.path,
@@ -1679,14 +1778,14 @@ mod requester_tests {
 
     #[tokio::test]
     async fn the_requesters_failure_is_a_transport_error() {
-        let (result, seen) = account_exists(Canned::failing("the proxy is down")).await;
+        let (result, record) = account_exists(Canned::failing("the proxy is down")).await;
         assert_matches!(
             result,
             Err(RequestError::Disconnected(
                 DisconnectedError::Transport { .. }
             ))
         );
-        assert_eq!(seen.len(), 1);
+        assert_eq!(requests(&record).len(), 1);
     }
 
     #[tokio::test]
@@ -1698,6 +1797,138 @@ mod requester_tests {
                 DisconnectedError::Transport { .. }
             ))
         );
+    }
+
+    /// A request that ran to an answer, or to a failure, is finished; nothing is holding the
+    /// wire, so nothing is told to let go of it. `cancel` names abandoned requests only.
+    #[tokio::test]
+    async fn a_request_that_completed_is_never_cancelled() {
+        let (result, record) = account_exists(Canned::answering(200, &[], b"")).await;
+        assert_matches!(result, Ok(true));
+        assert_eq!(cancelled(&record), &[] as &[u64]);
+
+        let (result, record) = account_exists(Canned::failing("the proxy is down")).await;
+        assert_matches!(result, Err(RequestError::Disconnected(_)));
+        assert_eq!(cancelled(&record), &[] as &[u64]);
+    }
+
+    /// A requester that does what a real one does when the reply is slow: parks the thread
+    /// `send` was called on, until `cancel` names the request it is parked on.
+    ///
+    /// [`Parked::GIVE_UP`] is what a real requester's own timeout would be. Nothing in the test
+    /// waits that long -- it exists so that a seam which stopped delivering cancellation fails
+    /// the assertions below and then lets the process exit, rather than leaving a blocking
+    /// thread parked forever and hanging the whole run on the runtime's shutdown.
+    struct Parked {
+        shared: Arc<ParkedShared>,
+    }
+
+    impl Parked {
+        const GIVE_UP: Duration = Duration::from_secs(20);
+    }
+
+    #[derive(Default)]
+    struct ParkedShared {
+        state: Mutex<ParkedState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct ParkedState {
+        in_flight: Option<u64>,
+        cancelled: Vec<u64>,
+        returned: bool,
+    }
+
+    impl ParkedShared {
+        fn with<R>(&self, body: impl FnOnce(&ParkedState) -> R) -> R {
+            body(&self.state.lock().expect("not poisoned"))
+        }
+    }
+
+    impl ChatRequester for Parked {
+        fn send(
+            &self,
+            request_id: u64,
+            _method: String,
+            _path: String,
+            _headers: Box<[String]>,
+            _body: Vec<u8>,
+        ) -> Result<ChatRequesterResponse, std::io::Error> {
+            let mut state = self.shared.state.lock().expect("not poisoned");
+            state.in_flight = Some(request_id);
+            self.shared.changed.notify_all();
+            let (mut state, _) = self
+                .shared
+                .changed
+                .wait_timeout_while(state, Self::GIVE_UP, |state| {
+                    !state.cancelled.contains(&request_id)
+                })
+                .expect("not poisoned");
+            state.returned = true;
+            self.shared.changed.notify_all();
+            // Discarded: whoever asked has gone. An error is what a torn-down request is.
+            Err(std::io::Error::other("the caller let go"))
+        }
+
+        fn cancel(&self, request_id: u64) {
+            let mut state = self.shared.state.lock().expect("not poisoned");
+            state.cancelled.push(request_id);
+            self.shared.changed.notify_all();
+        }
+    }
+
+    /// Polls rather than blocks: this runs on the test's runtime thread, which is also the one
+    /// that has to drop the abandoned future.
+    async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// The whole of what the seam adds. A caller that goes away mid-request -- which is what
+    /// libsignal's own cancellation does to the bridged future, dropping it -- reaches the
+    /// requester as `cancel` naming the id `send` was given, and the parked call gets its
+    /// thread back. Without that, both waits below expire: the blocking thread stays parked
+    /// and the wire stays held until the app's own timeout, long after the caller was told
+    /// the request was cancelled.
+    #[tokio::test]
+    async fn a_request_dropped_mid_flight_is_cancelled_by_id() {
+        let shared = Arc::<ParkedShared>::default();
+        let connection = UnauthenticatedChatConnection::with_requester(Box::new(Parked {
+            shared: Arc::clone(&shared),
+        }));
+        let call = tokio::spawn(async move {
+            connection
+                .as_typed(|chat| chat.account_exists(ACI.into()))
+                .await
+        });
+
+        eventually("the request to reach the requester", || {
+            shared.with(|state| state.in_flight.is_some())
+        })
+        .await;
+        let request_id = shared.with(|state| state.in_flight.expect("in flight"));
+
+        call.abort();
+
+        eventually("the requester to be told to let go", || {
+            shared.with(|state| !state.cancelled.is_empty())
+        })
+        .await;
+        assert_eq!(
+            shared.with(|state| state.cancelled.clone()),
+            vec![request_id],
+            "cancelled the wrong request"
+        );
+        eventually("the parked call to return", || {
+            shared.with(|state| state.returned)
+        })
+        .await;
     }
 
     #[tokio::test]
